@@ -19,9 +19,24 @@ const RESULT_COUNT = 5;
 const CANDIDATE_POOL_SIZE = 20;
 const REROLL_THRESHOLD = 0.05; // stay within 5% of the top score
 const FAVORITES_KEY = "screeningRoomFavorites";
+const HISTORY_KEY = "screeningRoomHistory";
+const HISTORY_LIMIT = 10;
+const THEME_KEY = "screeningRoomTheme";
+
+// Which step of the overall flow each screen represents.
+// null means "don't highlight a step" (utility screens).
+const SCREEN_TO_STEP = {
+  category: 0,
+  loading: 1,
+  quiz: 1,
+  result: 2,
+  favorites: null,
+  history: null,
+  error: null
+};
 
 const state = {
-  screen: "category",     // "category" | "loading" | "quiz" | "result" | "error" | "favorites"
+  screen: "category",
   selectedKinds: new Set(),
   questionIndex: 0,
   userVector: createEmptyVector(),
@@ -30,8 +45,21 @@ const state = {
   titlePool: [],
   loadError: null,
   rankedMatches: [],
-  resultIndex: 0
+  resultIndex: 0,
+  favoritesFilter: { query: "", kind: "all", sort: "recent" }
 };
+
+/* --- Small helpers --- */
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+
+function formatShortDate(timestamp) {
+  return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 
 /* --- Favorites: persisted in the browser's localStorage --- */
 
@@ -65,6 +93,70 @@ function toggleFavorite(title) {
     });
   }
   saveFavoritesList(favorites);
+}
+
+function getFilteredFavorites() {
+  let list = loadFavorites();
+  const { query, kind, sort } = state.favoritesFilter;
+
+  if (kind !== "all") {
+    list = list.filter(f => f.kind === kind);
+  }
+  if (query.trim()) {
+    const q = query.trim().toLowerCase();
+    list = list.filter(f => f.name.toLowerCase().includes(q));
+  }
+
+  if (sort === "recent") list = [...list].reverse();
+  else if (sort === "alpha") list = [...list].sort((a, b) => a.name.localeCompare(b.name));
+  else if (sort === "kind") list = [...list].sort((a, b) => a.kind.localeCompare(b.kind));
+
+  return list;
+}
+
+/* --- History: last few completed quiz results --- */
+
+function loadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistoryList(list) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+}
+
+function addToHistory(topMatch) {
+  const history = loadHistory();
+  history.unshift({
+    title: topMatch.title,
+    score: topMatch.score,
+    timestamp: Date.now()
+  });
+  saveHistoryList(history.slice(0, HISTORY_LIMIT));
+}
+
+/* --- Theme: persisted in localStorage --- */
+
+function loadTheme() {
+  return localStorage.getItem(THEME_KEY) || "dark";
+}
+
+function applyTheme(theme) {
+  document.body.classList.toggle("light-theme", theme === "light");
+  localStorage.setItem(THEME_KEY, theme);
+  updateThemeIcon();
+}
+
+function toggleTheme() {
+  applyTheme(loadTheme() === "dark" ? "light" : "dark");
+}
+
+function updateThemeIcon() {
+  const btn = document.getElementById("theme-toggle-btn");
+  if (btn) btn.textContent = document.body.classList.contains("light-theme") ? "☀️" : "🌙";
 }
 
 /* --- State transitions --- */
@@ -124,6 +216,7 @@ function enterResultScreen() {
   state.rankedMatches = getTopMatches(state.userVector, state.titlePool, [...state.selectedKinds], CANDIDATE_POOL_SIZE);
   state.resultIndex = 0;
   state.screen = "result";
+  addToHistory(state.rankedMatches[0]);
 }
 
 function rerollResult() {
@@ -143,17 +236,70 @@ function rerollResult() {
   render();
 }
 
+/* --- Navbar + stepper: persistent chrome outside #screen --- */
+
+function updateNavbarBadge() {
+  const badge = document.getElementById("saved-badge");
+  if (badge) {
+    const count = loadFavorites().length;
+    badge.textContent = count > 0 ? String(count) : "";
+  }
+}
+
+function renderStepper() {
+  const stepperEl = document.getElementById("stepper");
+  if (!stepperEl) return;
+
+  const activeStep = SCREEN_TO_STEP[state.screen];
+  if (activeStep === null || activeStep === undefined) {
+    stepperEl.innerHTML = "";
+    return;
+  }
+
+  const labels = ["Category", "Quiz", "Result"];
+  let html = "";
+  labels.forEach((label, i) => {
+    html += `
+      <div class="step-dot-group">
+        <span class="step-dot ${i <= activeStep ? "filled" : ""}"></span>
+        <span class="step-dot-label">${label}</span>
+      </div>
+    `;
+    if (i < labels.length - 1) {
+      html += `<span class="step-connector ${i < activeStep ? "filled" : ""}"></span>`;
+    }
+  });
+  stepperEl.innerHTML = html;
+}
+
+function setupNavbar() {
+  document.getElementById("navbar-home-btn").addEventListener("click", resetQuiz);
+  document.getElementById("theme-toggle-btn").addEventListener("click", toggleTheme);
+  document.getElementById("nav-history-btn").addEventListener("click", () => {
+    state.screen = "history";
+    render();
+  });
+  document.getElementById("nav-saved-btn").addEventListener("click", () => {
+    state.screen = "favorites";
+    render();
+  });
+}
+
 /* --- Rendering: one function per screen --- */
 
 const screenEl = document.getElementById("screen");
 
 function render() {
+  updateNavbarBadge();
+  renderStepper();
+
   if (state.screen === "category") return renderCategoryScreen();
   if (state.screen === "loading") return renderLoadingScreen();
   if (state.screen === "quiz") return renderQuizScreen();
   if (state.screen === "result") return renderResultScreen();
   if (state.screen === "error") return renderErrorScreen();
   if (state.screen === "favorites") return renderFavoritesScreen();
+  if (state.screen === "history") return renderHistoryScreen();
 }
 
 function renderCategoryScreen() {
@@ -162,11 +308,9 @@ function renderCategoryScreen() {
     { value: "movie", label: "Movies" },
     { value: "kdrama", label: "K-drama" }
   ];
-  const favoritesCount = loadFavorites().length;
 
   screenEl.innerHTML = `
-    <div class="card">
-      <p class="step-label">Step 1 of 2</p>
+    <div class="card screen-transition">
       <h2 class="question">What are you in the mood to watch?</h2>
       <p class="hint-text">Pick one or more.</p>
       <div class="chip-row" id="chip-row">
@@ -178,7 +322,6 @@ function renderCategoryScreen() {
       </div>
       ${state.categoryError ? `<p class="error-text" role="alert">Pick at least one category to continue.</p>` : ""}
       <button class="primary" id="start-btn">Start the quiz</button>
-      <button class="link-btn" id="view-favorites-btn">★ View saved (${favoritesCount})</button>
     </div>
   `;
 
@@ -203,16 +346,11 @@ function renderCategoryScreen() {
     }
     loadTitlesAndStartQuiz();
   });
-
-  document.getElementById("view-favorites-btn").addEventListener("click", () => {
-    state.screen = "favorites";
-    render();
-  });
 }
 
 function renderLoadingScreen() {
   screenEl.innerHTML = `
-    <div class="card loading-card">
+    <div class="card loading-card screen-transition">
       <div class="spinner" aria-hidden="true"></div>
       <p class="loading-text">Pulling in titles…</p>
     </div>
@@ -221,7 +359,7 @@ function renderLoadingScreen() {
 
 function renderErrorScreen() {
   screenEl.innerHTML = `
-    <div class="card">
+    <div class="card screen-transition">
       <p class="step-label">Something went wrong</p>
       <h2 class="question">Couldn't load titles.</h2>
       <p class="hint-text" role="alert" style="margin-top:-8px;">${state.loadError}</p>
@@ -239,7 +377,7 @@ function renderQuizScreen() {
   const progressPct = Math.round((state.questionIndex / QUESTIONS.length) * 100);
 
   screenEl.innerHTML = `
-    <div class="card">
+    <div class="card screen-transition">
       <div class="quiz-header">
         <button class="back-link" id="back-link-btn" aria-label="Go back">← Back</button>
         <p class="step-label">Question ${state.questionIndex + 1} of ${QUESTIONS.length}</p>
@@ -290,12 +428,12 @@ function renderResultScreen() {
   const canReroll = state.rankedMatches.length > 1;
 
   screenEl.innerHTML = `
-    <div class="ticket">
+    <div class="ticket screen-transition">
       <div class="ticket-top">
         <button class="star-btn" id="star-btn" aria-label="${favorited ? "Remove from saved" : "Save this pick"}">
           ${favorited ? "★" : "☆"}
         </button>
-        ${top.title.posterUrl ? `<img class="ticket-poster" src="${top.title.posterUrl}" alt="${top.title.name} poster" />` : ""}
+        ${top.title.posterUrl ? `<img class="ticket-poster" src="${top.title.posterUrl}" alt="${escapeHtml(top.title.name)} poster" />` : ""}
         <p class="ticket-eyebrow">Your match — ${matchPercent}% fit</p>
         <p class="ticket-title">${top.title.name}</p>
         <p class="ticket-kind">${formatKindLabel(top.title.kind)}</p>
@@ -363,24 +501,44 @@ function renderResultScreen() {
 }
 
 function renderFavoritesScreen() {
-  const favorites = loadFavorites();
+  const filtered = getFilteredFavorites();
+  const totalCount = loadFavorites().length;
+  const { query, kind, sort } = state.favoritesFilter;
 
   screenEl.innerHTML = `
-    <div class="card">
+    <div class="card screen-transition">
       <p class="step-label">Saved</p>
       <h2 class="question">Your saved picks</h2>
-      ${favorites.length === 0
-      ? `<p class="hint-text">Nothing saved yet — star a result to keep it here.</p>`
+
+      ${totalCount > 0 ? `
+        <div class="filter-row">
+          <input type="text" id="fav-search-input" class="filter-input" placeholder="Search saved titles…" value="${escapeHtml(query)}" />
+          <select id="fav-kind-select" class="filter-select">
+            <option value="all" ${kind === "all" ? "selected" : ""}>All kinds</option>
+            <option value="anime" ${kind === "anime" ? "selected" : ""}>Anime</option>
+            <option value="movie" ${kind === "movie" ? "selected" : ""}>Movies</option>
+            <option value="kdrama" ${kind === "kdrama" ? "selected" : ""}>K-drama</option>
+          </select>
+          <select id="fav-sort-select" class="filter-select">
+            <option value="recent" ${sort === "recent" ? "selected" : ""}>Recently added</option>
+            <option value="alpha" ${sort === "alpha" ? "selected" : ""}>A–Z</option>
+            <option value="kind" ${sort === "kind" ? "selected" : ""}>By kind</option>
+          </select>
+        </div>
+      ` : ""}
+
+      ${filtered.length === 0
+      ? `<p class="hint-text">${totalCount === 0 ? "Nothing saved yet — star a result to keep it here." : "No saved titles match your filters."}</p>`
       : `
-          <div class="favorite-list">
-            ${favorites.map((fav, i) => `
-              <div class="favorite-item">
-                ${fav.posterUrl ? `<img class="favorite-poster" src="${fav.posterUrl}" alt="${fav.name} poster" />` : ""}
-                <div class="favorite-info">
-                  <p class="favorite-name">${fav.name}</p>
-                  <p class="favorite-kind">${formatKindLabel(fav.kind)}</p>
+          <div class="list">
+            ${filtered.map((fav, i) => `
+              <div class="list-item">
+                ${fav.posterUrl ? `<img class="list-item-poster" src="${fav.posterUrl}" alt="${escapeHtml(fav.name)} poster" />` : ""}
+                <div class="list-item-info">
+                  <p class="list-item-name">${fav.name}</p>
+                  <p class="list-item-meta">${formatKindLabel(fav.kind)}</p>
                 </div>
-                <button class="favorite-remove" data-index="${i}" aria-label="Remove ${fav.name} from saved">✕</button>
+                <button class="list-item-action" data-index="${i}" aria-label="Remove ${escapeHtml(fav.name)} from saved">✕</button>
               </div>
             `).join("")}
           </div>
@@ -389,11 +547,41 @@ function renderFavoritesScreen() {
     </div>
   `;
 
-  document.querySelectorAll(".favorite-remove").forEach(btn => {
+  const searchInput = document.getElementById("fav-search-input");
+  if (searchInput) {
+    searchInput.addEventListener("input", (e) => {
+      state.favoritesFilter.query = e.target.value;
+      const cursorPos = e.target.selectionStart;
+      render();
+      const newInput = document.getElementById("fav-search-input");
+      if (newInput) {
+        newInput.focus();
+        newInput.setSelectionRange(cursorPos, cursorPos);
+      }
+    });
+  }
+
+  const kindSelect = document.getElementById("fav-kind-select");
+  if (kindSelect) {
+    kindSelect.addEventListener("change", (e) => {
+      state.favoritesFilter.kind = e.target.value;
+      render();
+    });
+  }
+
+  const sortSelect = document.getElementById("fav-sort-select");
+  if (sortSelect) {
+    sortSelect.addEventListener("change", (e) => {
+      state.favoritesFilter.sort = e.target.value;
+      render();
+    });
+  }
+
+  document.querySelectorAll(".list-item-action").forEach(btn => {
     btn.addEventListener("click", () => {
       const index = parseInt(btn.getAttribute("data-index"), 10);
-      const current = loadFavorites();
-      current.splice(index, 1);
+      const target = filtered[index];
+      const current = loadFavorites().filter(f => !(f.name === target.name && f.kind === target.kind));
       saveFavoritesList(current);
       render();
     });
@@ -405,4 +593,52 @@ function renderFavoritesScreen() {
   });
 }
 
+function renderHistoryScreen() {
+  const history = loadHistory();
+
+  screenEl.innerHTML = `
+    <div class="card screen-transition">
+      <p class="step-label">History</p>
+      <h2 class="question">Past matches</h2>
+      ${history.length === 0
+      ? `<p class="hint-text">No quiz history yet — take the quiz to start building one.</p>`
+      : `
+          <div class="list">
+            ${history.map((entry, i) => `
+              <div class="list-item">
+                ${entry.title.posterUrl ? `<img class="list-item-poster" src="${entry.title.posterUrl}" alt="${escapeHtml(entry.title.name)} poster" />` : ""}
+                <div class="list-item-info">
+                  <p class="list-item-name">${entry.title.name}</p>
+                  <p class="list-item-meta">${formatKindLabel(entry.title.kind)} · ${Math.round(entry.score * 100)}% · ${formatShortDate(entry.timestamp)}</p>
+                </div>
+                <button class="list-item-action list-item-view" data-index="${i}">View</button>
+              </div>
+            `).join("")}
+          </div>
+        `}
+      <button class="ghost" id="back-to-category-btn">Back</button>
+    </div>
+  `;
+
+  document.querySelectorAll(".list-item-view").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const index = parseInt(btn.getAttribute("data-index"), 10);
+      const entry = history[index];
+      state.rankedMatches = [{ title: entry.title, score: entry.score }];
+      state.resultIndex = 0;
+      state.screen = "result";
+      render();
+    });
+  });
+
+  document.getElementById("back-to-category-btn").addEventListener("click", () => {
+    state.screen = "category";
+    render();
+  });
+}
+
+/* --- Init --- */
+
+applyTheme(loadTheme());
+setupNavbar();
 render();

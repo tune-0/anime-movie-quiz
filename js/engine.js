@@ -1,9 +1,3 @@
-/* =========================================================
-   ENGINE — scoring logic, kept separate from data and UI.
-   Every function here is pure: same input, same output,
-   no reliance on the DOM or global state.
-   ========================================================= */
-
 import { TRAIT_KEYS, KIND_LABELS, makeVector } from "./data.js";
 
 export function createEmptyVector() {
@@ -46,6 +40,15 @@ export function getTopMatches(userVector, titles, selectedKinds, count) {
   return rankTitlesByMatch(userVector, pool).slice(0, count);
 }
 
+export function getTopMatchingTraits(userVector, titleVector, count) {
+  return TRAIT_KEYS
+    .map(key => ({ key, value: userVector[key] * titleVector[key] }))
+    .filter(c => c.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, count)
+    .map(c => c.key);
+}
+
 export function normalizeVectorTo100(vector) {
   const max = Math.max(...TRAIT_KEYS.map(key => vector[key]), 1);
   const result = {};
@@ -55,13 +58,4 @@ export function normalizeVectorTo100(vector) {
 
 export function formatKindLabel(kind) {
   return KIND_LABELS[kind] || kind;
-}
-
-export function getTopMatchingTraits(userVector, titleVector, count) {
-  return TRAIT_KEYS
-    .map(key => ({ key, value: userVector[key] * titleVector[key] }))
-    .filter(c => c.value > 0)
-    .sort((a, b) => b.value - a.value)
-    .slice(0, count)
-    .map(c => c.key);
 }
