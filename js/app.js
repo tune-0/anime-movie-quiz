@@ -17,14 +17,12 @@ import { fetchTitlesForKinds } from "./api.js";
 
 const RESULT_COUNT = 5;
 const CANDIDATE_POOL_SIZE = 20;
-const REROLL_THRESHOLD = 0.05; // stay within 5% of the top score
+const REROLL_THRESHOLD = 0.05;
 const FAVORITES_KEY = "screeningRoomFavorites";
 const HISTORY_KEY = "screeningRoomHistory";
 const HISTORY_LIMIT = 10;
 const THEME_KEY = "screeningRoomTheme";
 
-// Which step of the overall flow each screen represents.
-// null means "don't highlight a step" (utility screens).
 const SCREEN_TO_STEP = {
   category: 0,
   loading: 1,
@@ -32,6 +30,7 @@ const SCREEN_TO_STEP = {
   result: 2,
   favorites: null,
   history: null,
+  profile: null,
   error: null
 };
 
@@ -138,6 +137,33 @@ function addToHistory(topMatch) {
   saveHistoryList(history.slice(0, HISTORY_LIMIT));
 }
 
+/* --- Taste profile: derived from history, no extra storage needed --- */
+
+function computeTasteProfile(history) {
+  if (history.length === 0) return null;
+
+  const kindCounts = {};
+  history.forEach(entry => {
+    kindCounts[entry.title.kind] = (kindCounts[entry.title.kind] || 0) + 1;
+  });
+  const topKind = Object.keys(kindCounts).sort((a, b) => kindCounts[b] - kindCounts[a])[0];
+
+  const avgVector = createEmptyVector();
+  history.forEach(entry => {
+    const normalized = normalizeVectorTo100(entry.title.vector);
+    TRAIT_KEYS.forEach(key => { avgVector[key] += normalized[key]; });
+  });
+  TRAIT_KEYS.forEach(key => { avgVector[key] = Math.round(avgVector[key] / history.length); });
+
+  const topTraits = TRAIT_KEYS
+    .map(key => ({ key, value: avgVector[key] }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 2)
+    .map(t => t.key);
+
+  return { topKind, avgVector, topTraits, count: history.length };
+}
+
 /* --- Theme: persisted in localStorage --- */
 
 function loadTheme() {
@@ -236,7 +262,7 @@ function rerollResult() {
   render();
 }
 
-/* --- Navbar + stepper: persistent chrome outside #screen --- */
+/* --- Navbar + stepper --- */
 
 function updateNavbarBadge() {
   const badge = document.getElementById("saved-badge");
@@ -285,7 +311,7 @@ function setupNavbar() {
   });
 }
 
-/* --- Rendering: one function per screen --- */
+/* --- Rendering --- */
 
 const screenEl = document.getElementById("screen");
 
@@ -300,6 +326,7 @@ function render() {
   if (state.screen === "error") return renderErrorScreen();
   if (state.screen === "favorites") return renderFavoritesScreen();
   if (state.screen === "history") return renderHistoryScreen();
+  if (state.screen === "profile") return renderProfileScreen();
 }
 
 function renderCategoryScreen() {
@@ -350,10 +377,28 @@ function renderCategoryScreen() {
 
 function renderLoadingScreen() {
   screenEl.innerHTML = `
-    <div class="card loading-card screen-transition">
-      <div class="spinner" aria-hidden="true"></div>
-      <p class="loading-text">Pulling in titles…</p>
+    <div class="ticket screen-transition" aria-hidden="true">
+      <div class="ticket-top">
+        <div class="skeleton-block skeleton-poster"></div>
+        <div class="skeleton-block skeleton-line skeleton-line-eyebrow"></div>
+        <div class="skeleton-block skeleton-line skeleton-line-title"></div>
+        <div class="skeleton-block skeleton-line skeleton-line-kind"></div>
+      </div>
+      <div class="ticket-perf"></div>
+      <div class="ticket-bottom">
+        <div class="skeleton-block skeleton-line skeleton-line-blurb"></div>
+        <div class="skeleton-block skeleton-line skeleton-line-blurb" style="width:70%;"></div>
+        <div class="traits">
+          ${Array(6).fill(0).map(() => `
+            <div class="trait-row">
+              <div class="skeleton-block skeleton-line" style="width:60%;height:10px;margin-bottom:6px;"></div>
+              <div class="skeleton-block" style="height:5px;border-radius:3px;"></div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
     </div>
+    <p class="loading-text" style="text-align:center;margin-top:14px;">Pulling in titles…</p>
   `;
 }
 
@@ -600,10 +645,11 @@ function renderHistoryScreen() {
     <div class="card screen-transition">
       <p class="step-label">History</p>
       <h2 class="question">Past matches</h2>
+      ${history.length > 0 ? `<button class="link-btn" id="view-profile-btn">📊 View taste profile</button>` : ""}
       ${history.length === 0
       ? `<p class="hint-text">No quiz history yet — take the quiz to start building one.</p>`
       : `
-          <div class="list">
+          <div class="list" style="margin-top:16px;">
             ${history.map((entry, i) => `
               <div class="list-item">
                 ${entry.title.posterUrl ? `<img class="list-item-poster" src="${entry.title.posterUrl}" alt="${escapeHtml(entry.title.name)} poster" />` : ""}
@@ -620,6 +666,14 @@ function renderHistoryScreen() {
     </div>
   `;
 
+  const profileBtn = document.getElementById("view-profile-btn");
+  if (profileBtn) {
+    profileBtn.addEventListener("click", () => {
+      state.screen = "profile";
+      render();
+    });
+  }
+
   document.querySelectorAll(".list-item-view").forEach(btn => {
     btn.addEventListener("click", () => {
       const index = parseInt(btn.getAttribute("data-index"), 10);
@@ -634,6 +688,52 @@ function renderHistoryScreen() {
   document.getElementById("back-to-category-btn").addEventListener("click", () => {
     state.screen = "category";
     render();
+  });
+}
+
+function renderProfileScreen() {
+  const history = loadHistory();
+  const profile = computeTasteProfile(history);
+
+  screenEl.innerHTML = `
+    <div class="card screen-transition">
+      <p class="step-label">Taste Profile</p>
+      <h2 class="question">Based on your last ${profile ? profile.count : 0} match${profile && profile.count === 1 ? "" : "es"}</h2>
+      ${!profile
+      ? `<p class="hint-text">Take a few quizzes to build a taste profile.</p>`
+      : `
+          <p class="hint-text" style="margin-top:0;">
+            You lean mostly toward <strong>${profile.topTraits.join(" + ")}</strong>,
+            and pick <strong>${formatKindLabel(profile.topKind)}</strong> most often.
+          </p>
+          <div class="traits" style="margin-top:20px;">
+            ${TRAIT_KEYS.map(key => `
+              <div class="trait-row">
+                <div class="trait-name"><span>${key}</span><span>${profile.avgVector[key]}</span></div>
+                <div class="trait-bar-track">
+                  <div class="trait-bar-fill" style="width:${profile.avgVector[key]}%"></div>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        `}
+      <button class="ghost" id="back-to-history-btn">Back</button>
+    </div>
+  `;
+
+  document.getElementById("back-to-history-btn").addEventListener("click", () => {
+    state.screen = "history";
+    render();
+  });
+}
+
+/* --- Service worker registration (enables install + offline shell) --- */
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch((err) => {
+      console.warn("Service worker registration failed:", err);
+    });
   });
 }
 
